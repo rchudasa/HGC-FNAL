@@ -33,34 +33,57 @@ async def create_local_table(conn):
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS module_tests (
             id SERIAL PRIMARY KEY,
-            module_name VARCHAR(100),
-            test_type VARCHAR(50),
-            test_data JSONB,
+            module_name TEXT,
+            status INTEGER,
+            status_desc TEXT,
+            ratio_i_at_vs REAL,
+            ratio_at_vs REAL[],
+            rel_hum TEXT,
+            temp_c TEXT,
+            date_test DATE,
+            meas_v REAL[],
+            meas_i REAL[],
             imported_at TIMESTAMP
         );
     """)
 
-async def fetch_cmu_data(module_name):
-    """Fetch data from CMU's hgcdb database for a specific module."""
-    mac_dict = {'CMU': {'host': 'cmsmac04.phys.cmu.edu', 'dbname': 'hgcdb'}}
+async def fetch_testing_data(macid, table_type, module_name):
+    """Fetch data from MAC's hgcdb database for a specific module."""
+    mac_dict = {
+        'CMU': {'host': 'cmsmac04.phys.cmu.edu', 'dbname': 'hgcdb'}, 
+        'UCSB': {'host': 'gut.physics.ucsb.edu', 'dbname': 'hgcdb'}
+    }
     conn = await asyncpg.connect(
         user='viewer',
-        database=mac_dict['CMU']['dbname'],
-        host=mac_dict['CMU']['host']
+        database=mac_dict[macid]['dbname'],
+        host=mac_dict[macid]['host']
     )
     
+    # Fetch data for the specified module from module_iv_test with latest mod_ivtest_no
+    query_iv = """
+        SELECT module_name, status, status_desc, ratio_i_at_vs, ratio_at_vs, rel_hum, temp_c, date_test, meas_v, meas_i
+        FROM module_iv_test
+        WHERE module_name = $3 AND mod_ivtest_no = (
+            SELECT MAX(mod_ivtest_no) FROM module_iv_test WHERE module_name = $3
+        );
+    """
+    query_ped = """
+        SELECT module_name, status, status_desc, ratio_i_at_vs, ratio_at_vs,
+    
+
     # Fetch data for the specified module from the three tables
-    query_iv = "SELECT *, 'iv' AS test_type FROM module_iv_test WHERE module_name = $1 ORDER BY mod_ivtest_no;"
-    query_ped = "SELECT *, 'pedestal' AS test_type FROM module_pedestal_test WHERE module_name = $1 ORDER BY mod_pedtest_no;"
-    query_qcs = "SELECT *, 'qc_summary' AS test_type FROM module_qc_summary WHERE module_name = $1 ORDER BY mod_qc_no;"
+    # query_iv = "SELECT *, 'iv' AS test_type FROM module_iv_test WHERE module_name = $1 ORDER BY mod_ivtest_no;"
+    # query_ped = "SELECT *, 'pedestal' AS test_type FROM module_pedestal_test WHERE module_name = $1 ORDER BY mod_pedtest_no;"
+    # query_qcs = "SELECT *, 'qc_summary' AS test_type FROM module_qc_summary WHERE module_name = $1 ORDER BY mod_qc_no;"
     
     iv_rows = await conn.fetch(query_iv, module_name)
-    ped_rows = await conn.fetch(query_ped, module_name)
-    qcs_rows = await conn.fetch(query_qcs, module_name)
+    # ped_rows = await conn.fetch(query_ped, module_name)
+    # qcs_rows = await conn.fetch(query_qcs, module_name)
     await conn.close()
     
     # Combine rows
-    return [row for row in iv_rows + ped_rows + qcs_rows]
+    #return [row for row in iv_rows + ped_rows + qcs_rows]
+    return iv_rows
 
 async def upload_to_local_db(data, local_db_config, db_name):
     """Upload data to the module_tests table in the local database."""
@@ -77,12 +100,22 @@ async def upload_to_local_db(data, local_db_config, db_name):
     for row in data:
         await conn.execute(
             """
-            INSERT INTO module_tests (module_name, test_type, test_data, imported_at)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO module_tests (
+                module_name, status, status_desc, ratio_i_at_vs, ratio_at_vs, 
+                rel_hum, temp_c, date_test, meas_v, meas_i, imported_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
             row['module_name'],
-            row['test_type'],
-            {k: v for k, v in row.items() if k not in ('module_name', 'test_type')},
+            row['status'],
+            row['status_desc'],
+            row['ratio_i_at_vs'],
+            row['ratio_at_vs'],
+            row['rel_hum'],
+            row['temp_c'],
+            row['date_test'],
+            row['meas_v'],
+            row['meas_i'],
             datetime.now()
         )
     await conn.close()
@@ -91,16 +124,18 @@ async def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Fetch CMU module data and store in a local PostgreSQL database.")
     parser.add_argument('-mn', '--module_name', required=True, help="Module name to fetch data for (e.g., MODULE001)")
+    parser.add_argument('-mac', '--mac', default=None, required=True, help="MAC: CMU, UCSB")
     args = parser.parse_args()
     module_name = args.module_name.upper()  # Normalize to uppercase, consistent with original script
     
     # Local database configuration (update with your actual credentials)
     local_db_config = {
         'user': 'postgres',  # Replace with your PostgreSQL superuser or a user with database creation privileges
+        'password': db_password,  # Use the environment variable for the password
         'host': 'localhost',
         'port': 5432
     }
-    db_name = 'module_data'  # Name of the database to create
+    db_name = 'hgcdb_fnal'  # Name of the database to create
     
     # Create the local database
     await create_local_database(local_db_config, db_name)
